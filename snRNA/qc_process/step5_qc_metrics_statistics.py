@@ -28,6 +28,8 @@
 # Statistics:  Kruskal-Wallis (and one-way ANOVA as a check) across the five
 #              age groups on per-mouse medians, sexes combined; Benjamini-
 #              Hochberg correction across the two RNA metrics.
+#              Effect size: rank eta-squared, eta2_H = (H - k + 1) / (N - k), with a
+#              95% bootstrap CI (mice resampled within age groups).
 #===============================================================================
 
 import os
@@ -89,6 +91,30 @@ def bh(p):
     out = np.empty(n)
     out[order] = np.minimum(ranked, 1.0)
     return out
+
+
+def kruskal_effect(groups, n_boot=10000, seed=2026):
+    """Kruskal-Wallis test across groups, with rank eta-squared and a bootstrap CI.
+
+    Returns H, df, N, P, eta2_H, CI low, CI high.
+    eta2_H = (H - k + 1) / (N - k), negative values set to 0.
+    The 95% CI is the percentile interval from bootstrap resamples of mice
+    within each age group (fixed seed, so the numbers are reproducible).
+    """
+    k = len(groups)
+    n = sum(len(g) for g in groups)
+
+    def eta2(h):
+        return max(0.0, (h - k + 1) / (n - k))
+
+    res = stats.kruskal(*groups)
+    rng = np.random.default_rng(seed)
+    boot = np.empty(n_boot)
+    for b in range(n_boot):
+        resampled = [rng.choice(g, size=len(g), replace=True) for g in groups]
+        boot[b] = eta2(stats.kruskal(*resampled).statistic)
+    lo, hi = np.percentile(boot, [2.5, 97.5])
+    return res.statistic, k - 1, n, res.pvalue, eta2(res.statistic), lo, hi
 
 
 #-------------------------------------------------------------------------------
@@ -177,11 +203,14 @@ rows = []
 for metric in RNA_METRICS:
     groups = [g[f"median_{metric}"].values
               for _, g in per_mouse.groupby("age", observed=True)]
-    kw = stats.kruskal(*groups)
+    H, df_kw, n_mice, p, eta2, ci_lo, ci_hi = kruskal_effect(groups)
     an = stats.f_oneway(*groups)
-    rows.append(dict(metric=metric, n_per_group=",".join(str(len(g)) for g in groups),
-                     kruskal_H=kw.statistic, kruskal_p=kw.pvalue,
-                     anova_F=an.statistic, anova_p=an.pvalue))
+    rows.append(dict(metric=metric, test="Kruskal-Wallis", N_mice=n_mice,
+                     n_per_group=",".join(str(len(g)) for g in groups), df=df_kw,
+                     kruskal_H=H, kruskal_p=p,
+                     eta2_H=eta2, eta2_H_CI95_low=ci_lo, eta2_H_CI95_high=ci_hi,
+                     anova_F=an.statistic, anova_df=f"{df_kw},{n_mice - len(groups)}",
+                     anova_p=an.pvalue))
 tests = pd.DataFrame(rows)
 tests["kruskal_p_BH"] = bh(tests["kruskal_p"].values)     # across the two RNA metrics
 tests["anova_p_BH"] = bh(tests["anova_p"].values)
@@ -196,6 +225,14 @@ try:
         exact.to_excel(xw, sheet_name="per_age_group", index=False)
         per_mouse.to_excel(xw, sheet_name="per_mouse", index=False)
         tests.to_excel(xw, sheet_name="tests", index=False)
+        pd.DataFrame({"note": [
+            "Unit of study: mouse (one median per mouse and metric); N_mice mice, n_per_group mice per age group.",
+            "kruskal_H, df, kruskal_p: Kruskal-Wallis test across the five age groups (non-directional omnibus test, chi-square approximation with tie correction).",
+            "kruskal_p_BH: Benjamini-Hochberg adjusted P, correction across the two metrics of this modality.",
+            "eta2_H: rank eta-squared, (H - k + 1) / (N - k) with k = 5 age groups, negative values set to 0.",
+            "eta2_H_CI95_low / eta2_H_CI95_high: 95% percentile interval from 10,000 bootstrap resamples of mice within age groups (seed 2026).",
+            "anova_*: one-way ANOVA on the same per-mouse medians, shown as a check.",
+        ]}).to_excel(xw, sheet_name="notes", index=False)
     logger.info("Wrote ED_Fig1c_source_data.xlsx")
 except Exception as e:
     logger.warning(f"Excel file skipped (CSV files were written): {e}")
