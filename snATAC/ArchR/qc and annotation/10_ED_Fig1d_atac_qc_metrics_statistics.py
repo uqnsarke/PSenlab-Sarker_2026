@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+#===============================================================================
+# QC metric distributions and statistics for snATAC-seq (Extended Data Fig. 1d)
+#===============================================================================
+# Description: Re-draws the ATAC QC violin + box plots by age group and writes
+#              the numbers reported in the figure legend and Source Data:
+#                - per age group: n nuclei, n mice, minimum, lower whisker,
+#                  25th percentile, median, mean, 75th percentile,
+#                  upper whisker, maximum, n values beyond the whiskers
+#                - per mouse: n nuclei and median of each metric
+#                - age-group tests on per-mouse medians
+#              The unit of study is the mouse (n = 8 per age group, 4 female +
+#              4 male); nuclei from one mouse are not independent replicates,
+#              so tests are run on one median per mouse.
+#
+# Input:       atac_qc_per_nucleus.csv from 09_ED_Fig1d_export_atac_qc_metrics.R
+#              (columns Sample, age, sex, nFrags, n_features_ATAC)
+# Output:      ED_Fig1d_replot.pdf / .png
+#              ED_Fig1d_source_data_per_age.csv
+#              ED_Fig1d_source_data_per_mouse.csv
+#              ED_Fig1d_stats_per_mouse.csv
+#              ED_Fig1d_source_data.xlsx (the three tables above)
+#
+# Box plots:   centre = median; box = 25th and 75th percentiles; lower whisker
+#              = smallest value >= Q1 - 1.5 x IQR; upper whisker = largest value
+#              <= Q3 + 1.5 x IQR; values beyond the whiskers are not drawn.
+#
+# Statistics:  Kruskal-Wallis (and one-way ANOVA as a check) across the five
+#              age groups on per-mouse medians, sexes combined; Benjamini-
+#              Hochberg correction across the two ATAC metrics.
+#===============================================================================
+
+import os
+import logging
+import numpy as np
+import pandas as pd
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+from scipy import stats
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# Global plot settings
+mpl.rcParams["font.family"] = ["Arial", "DejaVu Sans"]
+mpl.rcParams["pdf.fonttype"] = 42
+mpl.rcParams["ps.fonttype"] = 42
+
+#-------------------------------------------------------------------------------
+# Configuration
+#-------------------------------------------------------------------------------
+INPUT_FILE = "qc_metrics/atac_qc_per_nucleus.csv"
+OUTPUT_DIR = "qc_metrics"
+
+# Columns in the exported table
+SAMPLE_COL = "Sample"
+AGE_COL = "age"
+SEX_COL = "sex"
+
+# QC metrics to summarise: column -> axis label
+ATAC_METRICS = {
+    "nFrags": "n frags ATAC",
+    "n_features_ATAC": "n features ATAC",
+}
+METRIC_NAMES = {
+    "nFrags": "ATAC fragments per nucleus",
+    "n_features_ATAC": "ATAC features per nucleus",
+}
+
+# Age group order and colors
+AGE_ORDER = ["young", "mid-age", "old", "pre-geriatric", "geriatric"]
+AGE_COLORS = {
+    "young": "#1ABC9C",
+    "mid-age": "#F1C40F",
+    "old": "#C39BD3",
+    "pre-geriatric": "#2980B9",
+    "geriatric": "#E84393",
+}
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+#-------------------------------------------------------------------------------
+# Helpers
+#-------------------------------------------------------------------------------
+def bh(p):
+    """Benjamini-Hochberg adjusted p-values."""
+    p = np.asarray(p, float)
+    n = len(p)
+    order = np.argsort(p)
+    ranked = np.minimum.accumulate((p[order] * n / (np.arange(n) + 1))[::-1])[::-1]
+    out = np.empty(n)
+    out[order] = np.minimum(ranked, 1.0)
+    return out
+
+
+#-------------------------------------------------------------------------------
+# Load
+#-------------------------------------------------------------------------------
+df = (pd.read_csv(INPUT_FILE)
+      .rename(columns={SAMPLE_COL: "sample", AGE_COL: "age", SEX_COL: "sex"}))
+df["age"] = pd.Categorical(df["age"].astype(str).str.replace("_", "-").str.lower(),
+                           categories=AGE_ORDER, ordered=True)
+df["sex"] = df["sex"].astype(str).str.lower()
+df["sample"] = df["sample"].astype(str)
+assert df["age"].notna().all(), "unrecognised age labels"
+
+mice = df.drop_duplicates("sample")
+logger.info(f"{len(df):,} nuclei, {df['sample'].nunique()} mice")
+print(pd.crosstab(mice["age"], mice["sex"]))      # expect 4 female + 4 male per age group
+
+#-------------------------------------------------------------------------------
+# Plot: violin (density of all nuclei) with inner box plot
+#-------------------------------------------------------------------------------
+fig, axes = plt.subplots(1, len(ATAC_METRICS), figsize=(7, 3.6))
+pos = np.arange(1, len(AGE_ORDER) + 1)
+for ax, (metric, label) in zip(axes, ATAC_METRICS.items()):
+    data = [df.loc[df["age"] == age, metric].values for age in AGE_ORDER]
+    parts = ax.violinplot(data, positions=pos, widths=0.9, showextrema=False)
+    for body, age in zip(parts["bodies"], AGE_ORDER):
+        body.set_facecolor(AGE_COLORS[age])
+        body.set_edgecolor("black")
+        body.set_linewidth(0.6)
+        body.set_alpha(1)
+    ax.boxplot(data, positions=pos, widths=0.1, showfliers=False, whis=1.5, patch_artist=True,
+               boxprops=dict(facecolor="white", edgecolor="black", linewidth=0.7),
+               medianprops=dict(color="black", linewidth=0.9),
+               whiskerprops=dict(linewidth=0.7), capprops=dict(linewidth=0))
+    ax.set_xticks(pos)
+    ax.set_xticklabels(AGE_ORDER, rotation=45, ha="right", fontsize=9)
+    ax.set_ylabel(label, fontsize=11)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+fig.text(0.01, 0.98, "d", fontsize=18, va="top")
+plt.tight_layout()
+fig.savefig(f"{OUTPUT_DIR}/ED_Fig1d_replot.pdf", bbox_inches="tight")
+fig.savefig(f"{OUTPUT_DIR}/ED_Fig1d_replot.png", bbox_inches="tight", dpi=200)
+plt.close()
+logger.info("Saved ED_Fig1d_replot")
+
+#-------------------------------------------------------------------------------
+# Box plot statistics per age group (all nuclei)
+#-------------------------------------------------------------------------------
+rows = []
+for metric in ATAC_METRICS:
+    for age in AGE_ORDER:
+        sub = df[df["age"] == age]
+        v = sub[metric].values
+        q1, med, q3 = np.percentile(v, [25, 50, 75])
+        iqr = q3 - q1
+        rows.append(dict(
+            metric=metric, age=age, n_nuclei=len(v), n_mice=sub["sample"].nunique(),
+            minimum=v.min(), whisker_low=v[v >= q1 - 1.5 * iqr].min(),
+            Q1_25th_percentile=q1, median=med, mean=v.mean(), Q3_75th_percentile=q3,
+            whisker_high=v[v <= q3 + 1.5 * iqr].max(), maximum=v.max(),
+            n_outliers_not_plotted=int(((v < q1 - 1.5 * iqr) | (v > q3 + 1.5 * iqr)).sum()),
+        ))
+exact = pd.DataFrame(rows)
+exact.to_csv(f"{OUTPUT_DIR}/ED_Fig1d_source_data_per_age.csv", index=False)
+print(exact.round(1).to_string(index=False))
+
+#-------------------------------------------------------------------------------
+# Per-mouse table (unit of study): n nuclei and median of each metric
+#-------------------------------------------------------------------------------
+per_mouse = df.groupby(["sample", "age", "sex"], observed=True).agg(
+    n_nuclei=("sample", "size"),
+    **{f"median_{m}": (m, "median") for m in ATAC_METRICS},
+).reset_index().sort_values(["age", "sex", "sample"])
+per_mouse.to_csv(f"{OUTPUT_DIR}/ED_Fig1d_source_data_per_mouse.csv", index=False)
+print(per_mouse.round(1).to_string(index=False))
+
+#-------------------------------------------------------------------------------
+# Age-group tests on per-mouse medians (sexes combined)
+#-------------------------------------------------------------------------------
+rows = []
+for metric in ATAC_METRICS:
+    groups = [g[f"median_{metric}"].values
+              for _, g in per_mouse.groupby("age", observed=True)]
+    kw = stats.kruskal(*groups)
+    an = stats.f_oneway(*groups)
+    rows.append(dict(metric=metric, n_per_group=",".join(str(len(g)) for g in groups),
+                     kruskal_H=kw.statistic, kruskal_p=kw.pvalue,
+                     anova_F=an.statistic, anova_p=an.pvalue))
+tests = pd.DataFrame(rows)
+tests["kruskal_p_BH"] = bh(tests["kruskal_p"].values)     # across the two ATAC metrics
+tests["anova_p_BH"] = bh(tests["anova_p"].values)
+tests.to_csv(f"{OUTPUT_DIR}/ED_Fig1d_stats_per_mouse.csv", index=False)
+print(tests.to_string(index=False, float_format=lambda x: f"{x:.3g}"))
+
+#-------------------------------------------------------------------------------
+# One Excel file for Source Data (skipped if openpyxl is not installed)
+#-------------------------------------------------------------------------------
+try:
+    with pd.ExcelWriter(f"{OUTPUT_DIR}/ED_Fig1d_source_data.xlsx") as xw:
+        exact.to_excel(xw, sheet_name="per_age_group", index=False)
+        per_mouse.to_excel(xw, sheet_name="per_mouse", index=False)
+        tests.to_excel(xw, sheet_name="tests", index=False)
+    logger.info("Wrote ED_Fig1d_source_data.xlsx")
+except Exception as e:
+    logger.warning(f"Excel file skipped (CSV files were written): {e}")
+
+#-------------------------------------------------------------------------------
+# Numbers for the figure legend
+#-------------------------------------------------------------------------------
+counts = df["age"].value_counts().reindex(AGE_ORDER)
+print("\nn nuclei: " + "; ".join(f"{a}, {n:,}" for a, n in counts.items()) + f"; {len(df):,} in total")
+print(f"Mice: {df['sample'].nunique()} total; per age group: "
+      f"{mice.groupby('age', observed=True).size().to_dict()}")
+for metric in ATAC_METRICS:
+    e = exact[exact["metric"] == metric]
+    print(f"{METRIC_NAMES[metric]}: minima " + ", ".join(f"{x:,.0f}" for x in e["minimum"])
+          + " and maxima " + ", ".join(f"{x:,.0f}" for x in e["maximum"]))
+print("Lower whisker equals the minimum in every group:",
+      bool((exact["whisker_low"] == exact["minimum"]).all()))
+print("Adjusted P, Kruskal-Wallis: " + ", ".join(
+    f"{METRIC_NAMES[r.metric]} {r.kruskal_p_BH:.3g}" for r in tests.itertuples()))
